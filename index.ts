@@ -17,6 +17,8 @@ import {
   bullCallSpreadProfit,
   payoffTable,
   range,
+  portfolioSize as defaultPortfolioSize,
+  resolveContracts,
 } from "./finance";
 
 /* =========================
@@ -63,8 +65,9 @@ Required for single-point P&L:
   --price <num>         Underlying price at expiry
 
 Optional:
-  --contracts <int>     Number of contracts (default 1)
+  --contracts <int>     Number of contracts (override auto sizing)
   --contractSize <int>  Shares per contract (default 100)
+  --portfolio <num>     Portfolio size used to size contracts (default 100000)
 
 Payoff table options (use one):
   --table "<p1,p2,...>"       Comma-separated prices
@@ -93,6 +96,7 @@ const main = (): void => {
       shortStrike: 800,
       priceAtExpiry: 750,
       netDebitPerShare: 70,
+      contracts: 1,
     });
     console.log(`  600/800 @ $750, debit $70 → ${formatUSD(demo)} per contract`);
     return;
@@ -103,8 +107,10 @@ const main = (): void => {
     const shortStrike = toNum("short", args["short"]);
     const priceAtExpiry = toNum("price", args["price"]);
     const netDebitPerShare = toNum("debit", args["debit"]);
-    const contracts = toNum("contracts", args["contracts"]) ?? 1;
+    const explicitContracts = toNum("contracts", args["contracts"]);
     const contractSize = toNum("contractSize", args["contractSize"]) ?? 100;
+    const portfolio = toNum("portfolio", args["portfolio"]) ?? defaultPortfolioSize;
+    const contractsDerivedFromPortfolio = explicitContracts === undefined;
 
     // If table flags are present, we build a payoff table; otherwise single-point P&L.
     const tableCsv = typeof args["table"] === "string" ? (args["table"] as string) : undefined;
@@ -119,6 +125,14 @@ const main = (): void => {
       printUsage();
       throw new Error("Missing required arguments.");
     }
+
+    const debit = netDebitPerShare as number;
+    const sizedContracts = resolveContracts({
+      contracts: explicitContracts,
+      portfolioSizeValue: portfolio,
+      netDebitPerShare: debit,
+      contractSize,
+    });
 
     if (tableCsv || tableRange) {
       let prices: number[] = [];
@@ -139,9 +153,10 @@ const main = (): void => {
       const base = {
         longStrike,
         shortStrike,
-        netDebitPerShare,
+        netDebitPerShare: debit,
         contractSize,
-        contracts,
+        contracts: sizedContracts,
+        portfolioSize: portfolio,
       };
 
       const rows = payoffTable(
@@ -149,39 +164,50 @@ const main = (): void => {
         prices
       );
 
-      console.log(`\nPayoff table — Bull Call Spread ${longStrike}/${shortStrike}, debit ${formatUSD(netDebitPerShare)} per share`);
-      console.log(`(contractSize=${contractSize}, contracts=${contracts})\n`);
+      console.log(`\nPayoff table — Bull Call Spread ${longStrike}/${shortStrike}, debit ${formatUSD(debit)} per share`);
+      const contractNote = contractsDerivedFromPortfolio ? " (derived from portfolio)" : "";
+      console.log(`(contractSize=${contractSize}, contracts=${sizedContracts}${contractNote}, portfolioSize=${portfolio})\n`);
       console.log(["Price", "Profit (total)"].join("\t"));
       for (const r of rows) {
         console.log(`${r.price}\t${formatUSD(r.profit)}`);
       }
 
-      const breakeven = bullCallSpreadBreakeven({ longStrike, netDebitPerShare });
-      const maxProfit = bullCallSpreadMaxProfitPerContract({ longStrike, shortStrike, netDebitPerShare, contractSize });
-      const maxLoss = bullCallSpreadMaxLossPerContract({ netDebitPerShare, contractSize });
+      const breakeven = bullCallSpreadBreakeven({ longStrike, netDebitPerShare: debit });
+      const maxProfit = bullCallSpreadMaxProfitPerContract({ longStrike, shortStrike, netDebitPerShare: debit, contractSize });
+      const maxLoss = bullCallSpreadMaxLossPerContract({ netDebitPerShare: debit, contractSize });
+      const totalMaxProfit = maxProfit * sizedContracts;
+      const totalMaxLoss = maxLoss * sizedContracts;
       console.log("\nBreakeven:", breakeven);
       console.log("Max profit per contract:", formatUSD(maxProfit));
+      console.log("Max profit total:", formatUSD(totalMaxProfit));
       console.log("Max loss per contract:", formatUSD(maxLoss));
+      console.log("Max loss total:", formatUSD(totalMaxLoss));
     } else {
       // Single point P&L
       const pnl = bullCallSpreadProfit({
         longStrike,
         shortStrike,
         priceAtExpiry: priceAtExpiry as number,
-        netDebitPerShare,
+        netDebitPerShare: debit,
         contractSize,
-        contracts,
+        contracts: sizedContracts,
+        portfolioSize: portfolio,
       });
+      const contractNote = contractsDerivedFromPortfolio ? " (derived from portfolio)" : "";
       console.log(
-        `P&L for ${longStrike}/${shortStrike} @ $${priceAtExpiry} (debit $${netDebitPerShare} per share, contractSize=${contractSize}, contracts=${contracts}): ${formatUSD(pnl)}`
+        `P&L for ${longStrike}/${shortStrike} @ $${priceAtExpiry} (debit $${debit} per share, contractSize=${contractSize}, contracts=${sizedContracts}${contractNote}, portfolioSize=${portfolio}): ${formatUSD(pnl)}`
       );
 
-      const breakeven = bullCallSpreadBreakeven({ longStrike, netDebitPerShare });
-      const maxProfit = bullCallSpreadMaxProfitPerContract({ longStrike, shortStrike, netDebitPerShare, contractSize });
-      const maxLoss = bullCallSpreadMaxLossPerContract({ netDebitPerShare, contractSize });
+      const breakeven = bullCallSpreadBreakeven({ longStrike, netDebitPerShare: debit });
+      const maxProfit = bullCallSpreadMaxProfitPerContract({ longStrike, shortStrike, netDebitPerShare: debit, contractSize });
+      const maxLoss = bullCallSpreadMaxLossPerContract({ netDebitPerShare: debit, contractSize });
+      const totalMaxProfit = maxProfit * sizedContracts;
+      const totalMaxLoss = maxLoss * sizedContracts;
       console.log("Breakeven:", breakeven);
       console.log("Max profit per contract:", formatUSD(maxProfit));
+      console.log("Portfolio profit:", formatUSD(totalMaxProfit));
       console.log("Max loss per contract:", formatUSD(maxLoss));
+      console.log("Portfolio loss:", formatUSD(totalMaxLoss));
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
