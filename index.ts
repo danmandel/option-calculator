@@ -20,6 +20,7 @@ import {
   portfolioSize as defaultPortfolioSize,
   resolveContracts,
 } from "./finance";
+import { fetchSpreadMidDebit } from "./alpaca";
 
 /* =========================
    Minimal CLI
@@ -61,8 +62,12 @@ Bull Call (Vertical Call) Spread CLI
 Required for single-point P&L:
   --long <num>          Lower strike (buy)
   --short <num>         Upper strike (sell)
-  --debit <num>         Net debit per share (e.g., 7.5 for $7.50)
   --price <num>         Underlying price at expiry
+
+Debit input options (choose one):
+  --debit <num>         Net debit per share (e.g., 7.5 for $7.50)
+  --symbol <ticker>     Fetch current mid debit via Alpaca Options API (requires --long/--short)
+  --expiry <YYYY-MM-DD> Optional expiration date for Alpaca lookup (auto-detects if omitted)
 
 Optional:
   --contracts <int>     Number of contracts (override auto sizing)
@@ -75,6 +80,7 @@ Payoff table options (use one):
 
 Examples:
   bun run index.ts --long 600 --short 800 --price 750 --debit 70
+  bun run index.ts --symbol TSLA --long 200 --short 220 --price 215 --expiry 2024-09-20
   bun run index.ts --long 600 --short 800 --debit 70 --tableRange 500:900:50
 `);
 };
@@ -84,7 +90,12 @@ const formatUSD = (n: number): string => {
   return s + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
 };
 
-const main = (): void => {
+const formatExpirationDate = (timestampSeconds: number): string => {
+  if (!Number.isFinite(timestampSeconds)) return "unknown expiry";
+  return new Date(timestampSeconds * 1000).toISOString().slice(0, 10);
+};
+
+const main = async (): Promise<void> => {
   const args = parseArgs(process.argv.slice(2));
 
   // Show usage if no args
@@ -106,19 +117,46 @@ const main = (): void => {
     const longStrike = toNum("long", args["long"]);
     const shortStrike = toNum("short", args["short"]);
     const priceAtExpiry = toNum("price", args["price"]);
-    const netDebitPerShare = toNum("debit", args["debit"]);
+    let netDebitPerShare = toNum("debit", args["debit"]);
     const explicitContracts = toNum("contracts", args["contracts"]);
     const contractSize = toNum("contractSize", args["contractSize"]) ?? 100;
     const portfolio = toNum("portfolio", args["portfolio"]) ?? defaultPortfolioSize;
     const contractsDerivedFromPortfolio = explicitContracts === undefined;
+    const rawSymbol = typeof args["symbol"] === "string" ? (args["symbol"] as string).trim() : undefined;
+    const symbol = rawSymbol && rawSymbol.length > 0 ? rawSymbol : undefined;
+    const rawExpiry = typeof args["expiry"] === "string" ? (args["expiry"] as string).trim() : undefined;
+    const expiry = rawExpiry && rawExpiry.length > 0 ? rawExpiry : undefined;
 
     // If table flags are present, we build a payoff table; otherwise single-point P&L.
     const tableCsv = typeof args["table"] === "string" ? (args["table"] as string) : undefined;
     const tableRange = typeof args["tableRange"] === "string" ? (args["tableRange"] as string) : undefined;
 
+    if (longStrike === undefined || shortStrike === undefined) {
+      printUsage();
+      throw new Error("Missing required --long or --short strike.");
+    }
+
+    if (netDebitPerShare === undefined) {
+      if (!symbol) {
+        printUsage();
+        throw new Error("Provide --debit or specify --symbol to auto-fetch the debit.");
+      }
+      const spreadQuote = await fetchSpreadMidDebit({
+        symbol,
+        longStrike,
+        shortStrike,
+        expiration: expiry,
+      });
+      netDebitPerShare = spreadQuote.netDebitPerShare;
+      const expiryText = formatExpirationDate(spreadQuote.expiration);
+      console.log(
+        `Fetched Alpaca mid debit for ${symbol.toUpperCase()} ${expiryText}: ${formatUSD(
+          spreadQuote.longMid
+        )} (long) - ${formatUSD(spreadQuote.shortMid)} (short) = ${formatUSD(netDebitPerShare)} per share`
+      );
+    }
+
     if (
-      longStrike === undefined ||
-      shortStrike === undefined ||
       netDebitPerShare === undefined ||
       (priceAtExpiry === undefined && !tableCsv && !tableRange)
     ) {
@@ -216,4 +254,4 @@ const main = (): void => {
   }
 };
 
-if (require.main === module) main();
+if (require.main === module) void main();
