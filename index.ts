@@ -148,7 +148,7 @@ const main = async (): Promise<void> => {
       }
       const spreadQuote = await fetchSpreadMidDebit({
         symbol,
-        longStrike,
+        longStrike, 
         shortStrike,
         expiration: expiry,
       });
@@ -225,7 +225,7 @@ const main = async (): Promise<void> => {
       const includeBenchmark = sharesForBenchmark !== undefined && sharesForBenchmark > 0;
       console.log(
         includeBenchmark
-          ? ["Price", "Profit (total)", "Underlying P&L (portfolio)"]
+          ? ["Price", "Profit (total)", "Portfolio value", "Underlying P&L (portfolio)"]
               .join("\t")
           : ["Price", "Profit (total)"].join("\t")
       );
@@ -234,7 +234,8 @@ const main = async (): Promise<void> => {
           const bench = underlyingPnL({ spot: spotNum, priceAtExpiry: r.price, shares: sharesForBenchmark });
           console.log(`${r.price}\t${formatUSD(r.profit)}\t${formatUSD(bench)}`);
         } else {
-          console.log(`${r.price}\t${formatUSD(r.profit)}`);
+          const value = portfolio + r.profit;
+        console.log(`${r.price}\t${formatUSD(r.profit)}\t${formatUSD(value)}`);
         }
       }
 
@@ -244,10 +245,12 @@ const main = async (): Promise<void> => {
       const maxLoss = bullCallSpreadMaxLossPerContract({ netDebitPerShare: debit, contractSize });
       const totalMaxProfit = maxProfit * sizedContracts;
       const totalMaxLoss = maxLoss * sizedContracts;
+      const maxPortfolioValue = portfolio + totalMaxProfit;
       console.log("\nBreakeven:", breakeven);
       console.log("Max profit strike:", maxProfitStrike);
       console.log("Max profit per contract:", formatUSD(maxProfit));
       console.log("Max profit total:", formatUSD(totalMaxProfit));
+      console.log("Portfolio value at max profit:", formatUSD(maxPortfolioValue));
       console.log("Max loss per contract:", formatUSD(maxLoss));
       console.log("Max loss total:", formatUSD(totalMaxLoss));
     } else {
@@ -283,10 +286,14 @@ const main = async (): Promise<void> => {
       const maxLoss = bullCallSpreadMaxLossPerContract({ netDebitPerShare: debit, contractSize });
       const totalMaxProfit = maxProfit * sizedContracts;
       const totalMaxLoss = maxLoss * sizedContracts;
+      const maxPortfolioValue = portfolio + totalMaxProfit;
+      const portfolioValueAtExpiry = portfolio + pnl;
       console.log("Breakeven:", breakeven);
       console.log("Max profit strike:", maxProfitStrike);
       console.log("Max profit per contract:", formatUSD(maxProfit));
       console.log("Max Portfolio profit:", formatUSD(totalMaxProfit));
+      console.log("Portfolio value at expiry:", formatUSD(portfolioValueAtExpiry));
+      console.log("Portfolio value at max profit:", formatUSD(maxPortfolioValue));
       console.log("Max loss per contract:", formatUSD(maxLoss));
       console.log("Max Portfolio loss:", formatUSD(totalMaxLoss));
     }
