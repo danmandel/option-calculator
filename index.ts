@@ -14,13 +14,15 @@ import {
   bullCallSpreadBreakeven,
   bullCallSpreadMaxLossPerContract,
   bullCallSpreadMaxProfitPerContract,
+  bullCallSpreadMaxProfitStrike,
   bullCallSpreadProfit,
+  underlyingPnL,
   payoffTable,
   range,
   portfolioSize as defaultPortfolioSize,
   resolveContracts,
 } from "./finance";
-import { fetchSpreadMidDebit } from "./alpaca";
+import { fetchSpreadMidDebit, fetchLatestStockPrice } from "./alpaca";
 
 /* =========================
    Minimal CLI
@@ -72,7 +74,7 @@ Debit input options (choose one):
 Optional:
   --contracts <int>     Number of contracts (override auto sizing)
   --contractSize <int>  Shares per contract (default 100)
-  --portfolio <num>     Portfolio size used to size contracts (default 100000)
+  --portfolio <num>     Portfolio size used to size contracts (default 150000)
 
 Payoff table options (use one):
   --table "<p1,p2,...>"       Comma-separated prices
@@ -82,6 +84,8 @@ Examples:
   bun run index.ts --long 600 --short 800 --price 750 --debit 70
   bun run index.ts --symbol TSLA --long 200 --short 220 --price 215 --expiry 2024-09-20
   bun run index.ts --long 600 --short 800 --debit 70 --tableRange 500:900:50
+\n+Notes:
+- If you pass --symbol, the CLI also fetches the latest stock price via Alpaca and prints an underlying benchmark using shares = floor(portfolio / spot).
 `);
 };
 
@@ -117,6 +121,7 @@ const main = async (): Promise<void> => {
     const longStrike = toNum("long", args["long"]);
     const shortStrike = toNum("short", args["short"]);
     const priceAtExpiry = toNum("price", args["price"]);
+    // Spot price for stock benchmark will be auto-fetched via Alpaca when symbol is provided.
     let netDebitPerShare = toNum("debit", args["debit"]);
     const explicitContracts = toNum("contracts", args["contracts"]);
     const contractSize = toNum("contractSize", args["contractSize"]) ?? 100;
@@ -172,6 +177,16 @@ const main = async (): Promise<void> => {
       contractSize,
     });
 
+    // Try to resolve the latest stock price for benchmark sizing if symbol is provided
+    let spotPrice: number | undefined;
+    if (symbol) {
+      try {
+        spotPrice = await fetchLatestStockPrice(symbol);
+      } catch (e) {
+        console.warn(`Warning: unable to fetch latest stock price for ${symbol}. Skipping underlying benchmark.`);
+      }
+    }
+
     if (tableCsv || tableRange) {
       let prices: number[] = [];
       if (tableCsv) {
@@ -205,17 +220,32 @@ const main = async (): Promise<void> => {
       console.log(`\nPayoff table — Bull Call Spread ${longStrike}/${shortStrike}, debit ${formatUSD(debit)} per share`);
       const contractNote = contractsDerivedFromPortfolio ? " (derived from portfolio)" : "";
       console.log(`(contractSize=${contractSize}, contracts=${sizedContracts}${contractNote}, portfolioSize=${portfolio})\n`);
-      console.log(["Price", "Profit (total)"].join("\t"));
+      const spotNum = Number.isFinite(spotPrice ?? NaN) ? (spotPrice as number) : undefined;
+      const sharesForBenchmark = spotNum ? Math.floor(portfolio / spotNum) : undefined;
+      const includeBenchmark = sharesForBenchmark !== undefined && sharesForBenchmark > 0;
+      console.log(
+        includeBenchmark
+          ? ["Price", "Profit (total)", "Underlying P&L (portfolio)"]
+              .join("\t")
+          : ["Price", "Profit (total)"].join("\t")
+      );
       for (const r of rows) {
-        console.log(`${r.price}\t${formatUSD(r.profit)}`);
+        if (includeBenchmark && spotNum && sharesForBenchmark) {
+          const bench = underlyingPnL({ spot: spotNum, priceAtExpiry: r.price, shares: sharesForBenchmark });
+          console.log(`${r.price}\t${formatUSD(r.profit)}\t${formatUSD(bench)}`);
+        } else {
+          console.log(`${r.price}\t${formatUSD(r.profit)}`);
+        }
       }
 
       const breakeven = bullCallSpreadBreakeven({ longStrike, netDebitPerShare: debit });
+      const maxProfitStrike = bullCallSpreadMaxProfitStrike({ longStrike, shortStrike });
       const maxProfit = bullCallSpreadMaxProfitPerContract({ longStrike, shortStrike, netDebitPerShare: debit, contractSize });
       const maxLoss = bullCallSpreadMaxLossPerContract({ netDebitPerShare: debit, contractSize });
       const totalMaxProfit = maxProfit * sizedContracts;
       const totalMaxLoss = maxLoss * sizedContracts;
       console.log("\nBreakeven:", breakeven);
+      console.log("Max profit strike:", maxProfitStrike);
       console.log("Max profit per contract:", formatUSD(maxProfit));
       console.log("Max profit total:", formatUSD(totalMaxProfit));
       console.log("Max loss per contract:", formatUSD(maxLoss));
@@ -233,19 +263,32 @@ const main = async (): Promise<void> => {
       });
       const contractNote = contractsDerivedFromPortfolio ? " (derived from portfolio)" : "";
       console.log(
-        `P&L for ${longStrike}/${shortStrike} @ $${priceAtExpiry} (debit $${debit} per share, contractSize=${contractSize}, contracts=${sizedContracts}${contractNote}, portfolioSize=${portfolio}): ${formatUSD(pnl)}`
+        `P&L for ${longStrike}/${shortStrike} @ $${priceAtExpiry} (debit $${debit} per share, contractSize=${contractSize}, contracts=${sizedContracts}${contractNote}, portfolioSize=${portfolio}): ${formatUSD(pnl)}\n`
       );
 
+      if (Number.isFinite(spotPrice ?? NaN)) {
+        const s = spotPrice as number;
+        const sharesForBenchmark = Math.floor(portfolio / s);
+        if (sharesForBenchmark > 0) {
+          const bench = underlyingPnL({ spot: s, priceAtExpiry: priceAtExpiry as number, shares: sharesForBenchmark });
+          console.log(
+            `Underlying benchmark P&L (buy with portfolio @ $${s} → $${priceAtExpiry}, shares=${sharesForBenchmark}): ${formatUSD(bench)}`
+          );
+        }
+      }
+
       const breakeven = bullCallSpreadBreakeven({ longStrike, netDebitPerShare: debit });
+      const maxProfitStrike = bullCallSpreadMaxProfitStrike({ longStrike, shortStrike });
       const maxProfit = bullCallSpreadMaxProfitPerContract({ longStrike, shortStrike, netDebitPerShare: debit, contractSize });
       const maxLoss = bullCallSpreadMaxLossPerContract({ netDebitPerShare: debit, contractSize });
       const totalMaxProfit = maxProfit * sizedContracts;
       const totalMaxLoss = maxLoss * sizedContracts;
       console.log("Breakeven:", breakeven);
+      console.log("Max profit strike:", maxProfitStrike);
       console.log("Max profit per contract:", formatUSD(maxProfit));
-      console.log("Portfolio profit:", formatUSD(totalMaxProfit));
+      console.log("Max Portfolio profit:", formatUSD(totalMaxProfit));
       console.log("Max loss per contract:", formatUSD(maxLoss));
-      console.log("Portfolio loss:", formatUSD(totalMaxLoss));
+      console.log("Max Portfolio loss:", formatUSD(totalMaxLoss));
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

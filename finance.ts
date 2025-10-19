@@ -123,6 +123,21 @@ export const bullCallSpreadMaxProfitPerContract = (opts: MaxProfitArgs): number 
   return (width - netDebitPerShare) * contractSize;
 };
 
+export interface MaxProfitStrikeArgs {
+  longStrike: number;
+  shortStrike: number;
+}
+
+/** Earliest underlying price at which max profit is achieved: the short strike */
+export const bullCallSpreadMaxProfitStrike = (opts: MaxProfitStrikeArgs): number => {
+  const { longStrike, shortStrike } = opts;
+  if (![longStrike, shortStrike].every(Number.isFinite))
+    throw new Error("All numeric inputs must be finite numbers.");
+  if (longStrike >= shortStrike)
+    throw new Error("longStrike must be LESS than shortStrike.");
+  return shortStrike;
+};
+
 export interface MaxLossArgs {
   netDebitPerShare: number;
   contractSize?: number; 
@@ -151,6 +166,24 @@ export const bullCallSpreadBreakeven = (opts: BreakevenArgs): number => {
   if (netDebitPerShare < 0)
     throw new Error("netDebitPerShare (debit) cannot be negative.");
   return longStrike + netDebitPerShare;
+};
+
+/* =========================
+   Underlying Benchmark
+   ========================= */
+
+export interface UnderlyingBenchmarkArgs {
+  spot: number; // today's underlying price
+  priceAtExpiry: number; // target/expiry underlying price
+  shares: number; // number of shares held
+}
+
+/** P&L for buying the underlying at spot and selling at priceAtExpiry for a given number of shares. */
+export const underlyingPnL = (opts: UnderlyingBenchmarkArgs): number => {
+  const { spot, priceAtExpiry, shares } = opts;
+  if (![spot, priceAtExpiry, shares].every(Number.isFinite))
+    throw new Error("underlyingPnL inputs must be finite numbers.");
+  return (priceAtExpiry - spot) * shares;
 };
 
 /* =========================
