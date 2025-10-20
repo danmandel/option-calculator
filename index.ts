@@ -16,6 +16,7 @@ import {
   bullCallSpreadMaxProfitPerContract,
   bullCallSpreadMaxProfitStrike,
   bullCallSpreadProfit,
+  longCallProfit,
   underlyingPnL,
   payoffTable,
   range,
@@ -74,7 +75,9 @@ Debit input options (choose one):
 Optional:
   --contracts <int>     Number of contracts (override auto sizing)
   --contractSize <int>  Shares per contract (default 100)
-  --portfolio <num>     Portfolio size used to size contracts (default 150000)
+  --portfolio <num>     Portfolio size used to size contracts (default 100000)
+  --spot <num>          Underlying entry price for benchmark (auto-fetched when possible)
+  --longPremium <num>   Long call premium per share (useful without --symbol)
 
 Payoff table options (use one):
   --table "<p1,p2,...>"       Comma-separated prices
@@ -84,8 +87,6 @@ Examples:
   bun run index.ts --long 600 --short 800 --price 750 --debit 70
   bun run index.ts --symbol TSLA --long 200 --short 220 --price 215 --expiry 2024-09-20
   bun run index.ts --long 600 --short 800 --debit 70 --tableRange 500:900:50
-\n+Notes:
-- If you pass --symbol, the CLI also fetches the latest stock price via Alpaca and prints an underlying benchmark using shares = floor(portfolio / spot).
 `);
 };
 
@@ -121,8 +122,15 @@ const main = async (): Promise<void> => {
     const longStrike = toNum("long", args["long"]);
     const shortStrike = toNum("short", args["short"]);
     const priceAtExpiry = toNum("price", args["price"]);
-    // Spot price for stock benchmark will be auto-fetched via Alpaca when symbol is provided.
+    const manualSpotPrice = toNum("spot", args["spot"]);
+    if (manualSpotPrice !== undefined && manualSpotPrice <= 0)
+      throw new Error("--spot must be a positive number.");
+    const manualLongPremium = toNum("longPremium", args["longPremium"]);
+    if (manualLongPremium !== undefined && manualLongPremium <= 0)
+      throw new Error("--longPremium must be a positive number.");
+    // Spot price for stock benchmark will be auto-fetched via Alpaca when symbol is provided unless overridden by --spot.
     let netDebitPerShare = toNum("debit", args["debit"]);
+    let longCallPremium = manualLongPremium;
     const explicitContracts = toNum("contracts", args["contracts"]);
     const contractSize = toNum("contractSize", args["contractSize"]) ?? 100;
     const portfolio = toNum("portfolio", args["portfolio"]) ?? defaultPortfolioSize;
@@ -154,11 +162,12 @@ const main = async (): Promise<void> => {
       });
       netDebitPerShare = spreadQuote.netDebitPerShare;
       const expiryText = formatExpirationDate(spreadQuote.expiration);
-      console.log(
-        `Fetched Alpaca mid debit for ${symbol.toUpperCase()} ${expiryText}: ${formatUSD(
-          spreadQuote.longMid
-        )} (long) - ${formatUSD(spreadQuote.shortMid)} (short) = ${formatUSD(netDebitPerShare)} per share`
-      );
+      // console.log(
+      //   `Fetched Alpaca mid debit for ${symbol.toUpperCase()} ${expiryText}: ${formatUSD(
+      //     spreadQuote.longMid
+      //   )} (long) - ${formatUSD(spreadQuote.shortMid)} (short) = ${formatUSD(netDebitPerShare)} per share`
+      // );
+      if (longCallPremium === undefined) longCallPremium = spreadQuote.longMid;
     }
 
     if (
@@ -178,14 +187,49 @@ const main = async (): Promise<void> => {
     });
 
     // Try to resolve the latest stock price for benchmark sizing if symbol is provided
-    let spotPrice: number | undefined;
-    if (symbol) {
+    let spotPrice: number | undefined = manualSpotPrice;
+    if (spotPrice === undefined && symbol) {
       try {
         spotPrice = await fetchLatestStockPrice(symbol);
+       
       } catch (e) {
-        console.warn(`Warning: unable to fetch latest stock price for ${symbol}. Skipping underlying benchmark.`);
+        console.warn(`Warning: unable to fetch latest stock price for ${symbol}. Provide --spot to enable benchmark.`);
       }
     }
+
+    if (longCallPremium !== undefined && longCallPremium <= 0) {
+      console.warn("Warning: long call premium must be positive; skipping long-call benchmark.");
+      longCallPremium = undefined;
+    }
+
+    const stockBenchmarkShares =
+      spotPrice !== undefined && spotPrice > 0 ? portfolio / spotPrice : undefined;
+    const stockBenchmarkAvailable = stockBenchmarkShares !== undefined && spotPrice !== undefined;
+
+    const longCallCostPerContract =
+      longCallPremium !== undefined ? longCallPremium * contractSize : undefined;
+    const longCallContracts =
+      longCallCostPerContract !== undefined && longCallCostPerContract > 0
+        ? Math.floor(portfolio / longCallCostPerContract)
+        : undefined;
+    if (longCallPremium !== undefined && (longCallContracts === undefined || longCallContracts <= 0)) {
+      console.warn(
+        "Warning: portfolio too small to purchase a single long call contract; skipping long-call benchmark."
+      );
+    }
+    const longCallBenchmarkAvailable =
+      longCallPremium !== undefined &&
+      longCallCostPerContract !== undefined &&
+      longCallContracts !== undefined &&
+      longCallContracts > 0;
+    const longCallCapitalDeployed =
+      longCallBenchmarkAvailable && longCallCostPerContract !== undefined && longCallContracts !== undefined
+        ? longCallCostPerContract * longCallContracts
+        : undefined;
+    const longCallCashRemaining =
+      longCallBenchmarkAvailable && longCallCapitalDeployed !== undefined
+        ? portfolio - longCallCapitalDeployed
+        : undefined;
 
     if (tableCsv || tableRange) {
       let prices: number[] = [];
@@ -220,39 +264,132 @@ const main = async (): Promise<void> => {
       console.log(`\nPayoff table — Bull Call Spread ${longStrike}/${shortStrike}, debit ${formatUSD(debit)} per share`);
       const contractNote = contractsDerivedFromPortfolio ? " (derived from portfolio)" : "";
       console.log(`(contractSize=${contractSize}, contracts=${sizedContracts}${contractNote}, portfolioSize=${portfolio})\n`);
-      const spotNum = Number.isFinite(spotPrice ?? NaN) ? (spotPrice as number) : undefined;
-      const sharesForBenchmark = spotNum ? Math.floor(portfolio / spotNum) : undefined;
-      const includeBenchmark = sharesForBenchmark !== undefined && sharesForBenchmark > 0;
-      console.log(
-        includeBenchmark
-          ? ["Price", "Profit (total)", "Portfolio value", "Underlying P&L (portfolio)"]
-              .join("\t")
-          : ["Price", "Profit (total)"].join("\t")
-      );
+      const includeStockBenchmark = stockBenchmarkAvailable;
+      const includeLongCallBenchmark = longCallBenchmarkAvailable;
+      const headers = ["Price", "Spread profit", "Spread value"];
+      if (includeStockBenchmark) {
+        headers.push("Stock value", "Stock profit");
+      }
+      if (includeLongCallBenchmark) {
+        headers.push("Long call value", "Long call profit");
+      }
+      console.log(headers.join("\t"));
       for (const r of rows) {
-        if (includeBenchmark && spotNum && sharesForBenchmark) {
-          const bench = underlyingPnL({ spot: spotNum, priceAtExpiry: r.price, shares: sharesForBenchmark });
-          console.log(`${r.price}\t${formatUSD(r.profit)}\t${formatUSD(bench)}`);
-        } else {
-          const value = portfolio + r.profit;
-        console.log(`${r.price}\t${formatUSD(r.profit)}\t${formatUSD(value)}`);
+        const spreadValue = portfolio + r.profit;
+        const row = [String(r.price), formatUSD(r.profit), formatUSD(spreadValue)];
+        if (includeStockBenchmark && spotPrice !== undefined && stockBenchmarkShares !== undefined) {
+          const stockProfit = underlyingPnL({
+            spot: spotPrice,
+            priceAtExpiry: r.price,
+            shares: stockBenchmarkShares,
+          });
+          const stockValue = portfolio + stockProfit;
+          row.push(formatUSD(stockValue), formatUSD(stockProfit));
         }
+        if (
+          includeLongCallBenchmark &&
+          longCallPremium !== undefined &&
+          longCallContracts !== undefined
+        ) {
+          const longCallBenchmarkProfit = longCallProfit({
+            strike: longStrike,
+            priceAtExpiry: r.price,
+            premiumPerShare: longCallPremium,
+            contractSize,
+            contracts: longCallContracts,
+          });
+          const longCallValue = portfolio + longCallBenchmarkProfit;
+          row.push(formatUSD(longCallValue), formatUSD(longCallBenchmarkProfit));
+        }
+        console.log(row.join("\t"));
       }
 
       const breakeven = bullCallSpreadBreakeven({ longStrike, netDebitPerShare: debit });
       const maxProfitStrike = bullCallSpreadMaxProfitStrike({ longStrike, shortStrike });
-      const maxProfit = bullCallSpreadMaxProfitPerContract({ longStrike, shortStrike, netDebitPerShare: debit, contractSize });
+      const maxProfit = bullCallSpreadMaxProfitPerContract({
+        longStrike,
+        shortStrike,
+        netDebitPerShare: debit,
+        contractSize,
+      });
       const maxLoss = bullCallSpreadMaxLossPerContract({ netDebitPerShare: debit, contractSize });
       const totalMaxProfit = maxProfit * sizedContracts;
       const totalMaxLoss = maxLoss * sizedContracts;
-      const maxPortfolioValue = portfolio + totalMaxProfit;
+      const spreadMaxPortfolioValue = portfolio + totalMaxProfit;
+      const highestPrice = Math.max(...prices);
+      const stockProfitAtHighest =
+        includeStockBenchmark && spotPrice !== undefined && stockBenchmarkShares !== undefined
+          ? underlyingPnL({
+              spot: spotPrice,
+              priceAtExpiry: highestPrice,
+              shares: stockBenchmarkShares,
+            })
+          : undefined;
+      const longCallProfitAtHighest =
+        includeLongCallBenchmark &&
+        longCallPremium !== undefined &&
+        longCallContracts !== undefined
+          ? longCallProfit({
+              strike: longStrike,
+              priceAtExpiry: highestPrice,
+              premiumPerShare: longCallPremium,
+              contractSize,
+              contracts: longCallContracts,
+            })
+          : undefined;
       console.log("\nBreakeven:", breakeven);
       console.log("Max profit strike:", maxProfitStrike);
       console.log("Max profit per contract:", formatUSD(maxProfit));
-      console.log("Max profit total:", formatUSD(totalMaxProfit));
-      console.log("Portfolio value at max profit:", formatUSD(maxPortfolioValue));
+      console.log("Spread portfolio max potential profit:", formatUSD(totalMaxProfit));
+      // 
+      if (includeStockBenchmark && spotPrice !== undefined && stockBenchmarkShares !== undefined) {
+        console.log("Stock benchmark entry price:", formatUSD(spotPrice));
+        console.log(
+          "Stock benchmark shares (full allocation):",
+          stockBenchmarkShares.toLocaleString(undefined, { maximumFractionDigits: 4 })
+        );
+        if (stockProfitAtHighest !== undefined) {
+          const stockValueAtHighest = portfolio + stockProfitAtHighest;
+          console.log(
+            `Stock benchmark value at highest table price (${highestPrice}):`,
+            formatUSD(stockValueAtHighest)
+          );
+          console.log(
+            "Stock benchmark profit at highest table price:",
+            formatUSD(stockProfitAtHighest)
+          );
+        }
+      }
+      if (
+        includeLongCallBenchmark &&
+        longCallPremium !== undefined &&
+        longCallContracts !== undefined &&
+        longCallCostPerContract !== undefined
+      ) {
+        console.log("Long call premium per share:", formatUSD(longCallPremium));
+        console.log(
+          "Long call contracts (full allocation):",
+          longCallContracts.toLocaleString(undefined, { maximumFractionDigits: 0 })
+        );
+        console.log("Long call cost per contract:", formatUSD(longCallCostPerContract));
+        if (longCallCapitalDeployed !== undefined && longCallCashRemaining !== undefined) {
+          console.log("Long call capital deployed:", formatUSD(longCallCapitalDeployed));
+          console.log("Long call cash remaining:", formatUSD(longCallCashRemaining));
+        }
+        if (longCallProfitAtHighest !== undefined) {
+          const longCallValueAtHighest = portfolio + longCallProfitAtHighest;
+          console.log(
+            `Long call portfolio value at highest table price (${highestPrice}):`,
+            formatUSD(longCallValueAtHighest)
+          );
+          console.log(
+            "Long call profit at highest table price:",
+            formatUSD(longCallProfitAtHighest)
+          );
+        }
+      }
       console.log("Max loss per contract:", formatUSD(maxLoss));
-      console.log("Max loss total:", formatUSD(totalMaxLoss));
+      console.log("Spread portfolio loss:", formatUSD(totalMaxLoss));
     } else {
       // Single point P&L
       const pnl = bullCallSpreadProfit({
@@ -265,37 +402,63 @@ const main = async (): Promise<void> => {
         portfolioSize: portfolio,
       });
       const contractNote = contractsDerivedFromPortfolio ? " (derived from portfolio)" : "";
-      console.log(
-        `P&L for ${longStrike}/${shortStrike} @ $${priceAtExpiry} (debit $${debit} per share, contractSize=${contractSize}, contracts=${sizedContracts}${contractNote}, portfolioSize=${portfolio}): ${formatUSD(pnl)}\n`
-      );
 
-      if (Number.isFinite(spotPrice ?? NaN)) {
-        const s = spotPrice as number;
-        const sharesForBenchmark = Math.floor(portfolio / s);
-        if (sharesForBenchmark > 0) {
-          const bench = underlyingPnL({ spot: s, priceAtExpiry: priceAtExpiry as number, shares: sharesForBenchmark });
-          console.log(
-            `Underlying benchmark P&L (buy with portfolio @ $${s} → $${priceAtExpiry}, shares=${sharesForBenchmark}): ${formatUSD(bench)}`
-          );
-        }
+      const spreadPortfolioValueAtExpiry = portfolio + pnl;
+      let stockBenchmarkValueAtExpiry: number | undefined;
+      if (
+        stockBenchmarkAvailable &&
+        spotPrice !== undefined &&
+        stockBenchmarkShares !== undefined &&
+        priceAtExpiry !== undefined
+      ) {
+        const stockProfitAtExpiry = underlyingPnL({
+          spot: spotPrice,
+          priceAtExpiry: priceAtExpiry as number,
+          shares: stockBenchmarkShares,
+        });
+        stockBenchmarkValueAtExpiry = portfolio + stockProfitAtExpiry;
       }
 
-      const breakeven = bullCallSpreadBreakeven({ longStrike, netDebitPerShare: debit });
-      const maxProfitStrike = bullCallSpreadMaxProfitStrike({ longStrike, shortStrike });
-      const maxProfit = bullCallSpreadMaxProfitPerContract({ longStrike, shortStrike, netDebitPerShare: debit, contractSize });
-      const maxLoss = bullCallSpreadMaxLossPerContract({ netDebitPerShare: debit, contractSize });
+      let longCallValueAtExpiry: number | undefined;
+      if (
+        longCallBenchmarkAvailable &&
+        longCallPremium !== undefined &&
+        longCallContracts !== undefined &&
+        priceAtExpiry !== undefined
+      ) {
+        const longCallProfitAtExpiry = longCallProfit({
+          strike: longStrike,
+          priceAtExpiry: priceAtExpiry as number,
+          premiumPerShare: longCallPremium,
+          contractSize,
+          contracts: longCallContracts,
+        });
+        longCallValueAtExpiry = portfolio + longCallProfitAtExpiry;
+      }
+
+      const maxProfit = bullCallSpreadMaxProfitPerContract({
+        longStrike,
+        shortStrike,
+        netDebitPerShare: debit,
+        contractSize,
+      });
       const totalMaxProfit = maxProfit * sizedContracts;
-      const totalMaxLoss = maxLoss * sizedContracts;
-      const maxPortfolioValue = portfolio + totalMaxProfit;
-      const portfolioValueAtExpiry = portfolio + pnl;
-      console.log("Breakeven:", breakeven);
-      console.log("Max profit strike:", maxProfitStrike);
-      console.log("Max profit per contract:", formatUSD(maxProfit));
-      console.log("Max Portfolio profit:", formatUSD(totalMaxProfit));
-      console.log("Portfolio value at expiry:", formatUSD(portfolioValueAtExpiry));
-      console.log("Portfolio value at max profit:", formatUSD(maxPortfolioValue));
-      console.log("Max loss per contract:", formatUSD(maxLoss));
-      console.log("Max Portfolio loss:", formatUSD(totalMaxLoss));
+      const spreadMaxPortfolioValue = portfolio + totalMaxProfit;
+
+      console.log("Spread portfolio value at expiry:", formatUSD(spreadPortfolioValueAtExpiry));
+      // console.log("Spread portfolio value at max profit:", formatUSD(spreadMaxPortfolioValue));
+      if (stockBenchmarkValueAtExpiry !== undefined) {
+        console.log("Stock benchmark portfolio value at expiry:", formatUSD(stockBenchmarkValueAtExpiry));
+      }
+      if (longCallValueAtExpiry !== undefined) {
+        console.log("Long call portfolio value at expiry:", formatUSD(longCallValueAtExpiry));
+      }
+
+       console.log(`Benchmark spot price for ${symbol?.toUpperCase()}: ${formatUSD(spotPrice || 0)}`);
+       console.log("Spread portfolio value at max profit:", formatUSD(spreadMaxPortfolioValue));
+      console.log(
+        `Spread summary: ${longStrike}/${shortStrike} @ $${priceAtExpiry} (debit $${debit} per share, contractSize=${contractSize}, contracts=${sizedContracts}${contractNote}, portfolioSize=${portfolio})`
+      );
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
