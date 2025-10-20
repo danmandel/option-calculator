@@ -1,0 +1,1 @@
+1. bun run index.ts --symbol TSLA --long 300 --short 800 --price 750 --expiry 2028-01-21
