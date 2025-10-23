@@ -188,7 +188,7 @@ const main = async (): Promise<void> => {
       try {
         spotPrice = await fetchLatestStockPrice(symbol);
        
-      } catch (e) {
+      } catch {
         console.warn(`Warning: unable to fetch latest stock price for ${symbol}. Provide --spot to enable benchmark.`);
       }
     }
@@ -293,7 +293,7 @@ const main = async (): Promise<void> => {
       const maxLoss = bullCallSpreadMaxLossPerContract({ netDebitPerShare: debit, contractSize });
       const totalMaxProfit = maxProfit * sizedContracts;
       const totalMaxLoss = maxLoss * sizedContracts;
-      const spreadMaxPortfolioValue = portfolio + totalMaxProfit;
+      // const spreadMaxPortfolioValue = portfolio + totalMaxProfit;
       const highestPrice = Math.max(...prices);
       const stockProfitAtHighest =
         includeStockBenchmark && spotPrice !== undefined && stockBenchmarkShares !== undefined
@@ -317,7 +317,6 @@ const main = async (): Promise<void> => {
       console.log("Max profit strike:", maxProfitStrike);
       console.log("Max profit per contract:", formatUSD(maxProfit));
       console.log("Spread portfolio max potential profit:", formatUSD(totalMaxProfit));
-      // 
       if (includeStockBenchmark && spotPrice !== undefined && stockBenchmarkShares !== undefined) {
         console.log("Stock benchmark entry price:", formatUSD(spotPrice));
         console.log(

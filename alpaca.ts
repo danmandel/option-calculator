@@ -381,7 +381,7 @@ const fetchContractsFromChain = async (
             : undefined;
         pageToken = nextToken && nextToken.trim() !== "" ? nextToken : undefined;
       } while (pageToken);
-    } catch (err) {
+              } catch {
       // Try next endpoint if first fails.
       continue;
     }
@@ -410,7 +410,7 @@ const fetchLatestQuotes = async (symbols: string[]): Promise<Record<string, Norm
     let payload: unknown;
     try {
       payload = await fetchJson(url);
-    } catch (err) {
+    } catch {
       continue;
     }
 
