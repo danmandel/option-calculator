@@ -1,6 +1,8 @@
 {
   "editor.codeActionsOnSave": {
     "source.fixAll.oxlint": "always"
-  }
+  },
+  "workbench.colorTheme": "Atom One Dark",
+  "workbench.iconTheme": "vscode-icons",
 }
 

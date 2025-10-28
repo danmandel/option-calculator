@@ -12,6 +12,7 @@
   },
   "scripts": {
     "lint": "oxlint --type-aware --tsconfig tsconfig.json .",
-    "lint:fix": "oxlint --type-aware --tsconfig tsconfig.json --fix ."
+    "lint:fix": "oxlint --type-aware --tsconfig tsconfig.json --fix .",
+    "test": "bun test"
   }
 }
